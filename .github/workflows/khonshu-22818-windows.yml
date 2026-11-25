@@ -1,0 +1,100 @@
+name: Build Divine Dismissal Windows x64
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: khonshu-v22818-standalone
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || github.event.release.tag_name == 'v2.28.18-beta'
+    runs-on: windows-2022
+    timeout-minutes: 25
+    env:
+      SOURCE_URL: https://github.com/Sonofargus666/Virtual-Khonshu/releases/download/v2.28.18-beta/Virtual_Khonshu_2_28_18_Divine_Dismissal_Test_Package.zip
+      SOURCE_SHA256: 2e9451884791c921c826889ae848bc5dc6afd9f9649b0b5275b8acd03a9bc3ff
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Download and verify approved source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'khonshu-source.zip'
+          Invoke-WebRequest -Uri $env:SOURCE_URL -OutFile $zip
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SOURCE_SHA256) { throw 'Approved source hash mismatch.' }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'khonshu-src')
+      - name: Build and test frozen Windows application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:RUNNER_TEMP 'khonshu-src/Virtual_Khonshu_2_28_18'
+          & (Join-Path $src 'build_standalone_windows.ps1')
+          if (-not $?) { throw 'Standalone build failed.' }
+      - name: Verify archive, bundled runtime and unchanged artwork
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:RUNNER_TEMP 'khonshu-src/Virtual_Khonshu_2_28_18'
+          $packages = @(Get-ChildItem -LiteralPath (Join-Path $src 'standalone-output') -Recurse -File -Filter 'Virtual_Khonshu_2_28_18_Standalone_Windows_x64.zip')
+          if ($packages.Count -ne 1) { throw 'Expected exactly one tested standalone package.' }
+          $env:KH_SOURCE = $src
+          $env:KH_PACKAGE = $packages[0].FullName
+          @'
+          import hashlib, json, os, pathlib, zipfile
+          src = pathlib.Path(os.environ['KH_SOURCE'])
+          archive = pathlib.Path(os.environ['KH_PACKAGE'])
+          with zipfile.ZipFile(archive) as z:
+              assert z.testzip() is None, 'Archive corruption'
+              names = set(z.namelist())
+              prefix = 'Virtual_Khonshu_2_28_18_Standalone/'
+              assert prefix + 'Virtual Khonshu.exe' in names, 'EXE missing'
+              assert any(n.endswith('/python312.dll') for n in names), 'Bundled Python missing'
+              assets = [p for p in src.iterdir() if p.is_file() and p.suffix.lower() in {'.png','.gif','.wav','.ico'}]
+              for sub in ['animations', 'cosmetics']:
+                  assets.extend(p for p in (src/sub).rglob('*') if p.is_file())
+              for p in assets:
+                  name = prefix + p.relative_to(src).as_posix()
+                  assert name in names, f'Missing locked asset: {name}'
+                  assert hashlib.sha256(z.read(name)).digest() == hashlib.sha256(p.read_bytes()).digest(), f'Changed asset: {name}'
+              assert not any(pathlib.PurePosixPath(n).name.lower() == 'khonshu_state.json' for n in names), 'Live save must never ship'
+              assert json.loads(z.read(prefix + 'khonshu_smoke_test.json'))['ok'], 'Frozen startup check failed'
+              print(f'Verified {len(assets)} unchanged asset files and bundled runtime.')
+          '@ | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'verify_khonshu.py') -Encoding utf8
+          python (Join-Path $env:RUNNER_TEMP 'verify_khonshu.py')
+          if ($LASTEXITCODE -ne 0) { throw 'Distribution validation failed.' }
+          New-Item -ItemType Directory -Path deliverable -Force | Out-Null
+          Copy-Item -LiteralPath $packages[0].FullName -Destination deliverable
+          $hash = (Get-FileHash -LiteralPath (Join-Path 'deliverable' $packages[0].Name) -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($packages[0].Name)" | Set-Content -Path 'deliverable/SHA256.txt' -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Virtual-Khonshu-2.28.18-Windows-x64
+          path: deliverable/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+  publish-tested-binary:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Virtual-Khonshu-2.28.18-Windows-x64
+          path: deliverable
+      - name: Attach tested standalone package to the existing beta release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload v2.28.18-beta deliverable/Virtual_Khonshu_2_28_18_Standalone_Windows_x64.zip deliverable/SHA256.txt --repo Sonofargus666/Virtual-Khonshu
