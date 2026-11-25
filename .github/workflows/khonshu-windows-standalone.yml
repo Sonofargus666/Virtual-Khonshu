@@ -1,0 +1,90 @@
+name: Build Khonshu Windows standalone
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/khonshu-windows-standalone.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: khonshu-windows-standalone
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    env:
+      SOURCE_URL: https://github.com/Sonofargus666/Virtual-Khonshu/releases/download/v2.28.17-beta/Virtual_Khonshu_2_28_17_Moonlit_Header.zip
+      SOURCE_SHA256: 567d2f066027b6c2ac518076e9e4c0d3237402917a821fb56bfc12b2d6750dc0
+    steps:
+      - name: Set up Windows x64 Python for the build
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Download and verify the published source ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'khonshu-source.zip'
+          Invoke-WebRequest -Uri $env:SOURCE_URL -OutFile $zip
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SOURCE_SHA256) {
+            throw 'Source archive SHA-256 mismatch; build refused.'
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'khonshu-src')
+      - name: Build bundled EXE and run Windows startup checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:RUNNER_TEMP 'khonshu-src/Virtual_Khonshu_2_28_17'
+          & (Join-Path $src 'build_standalone_windows.ps1')
+          if (-not $?) { throw 'Standalone build or runtime checks failed.' }
+      - name: Verify artwork and prepare downloadable ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:RUNNER_TEMP 'khonshu-src/Virtual_Khonshu_2_28_17'
+          $packages = @(Get-ChildItem -LiteralPath (Join-Path $src 'standalone-output') -Recurse -File -Filter 'Virtual_Khonshu_2_28_17_Standalone_Windows_x64.zip')
+          if ($packages.Count -ne 1) { throw 'Expected exactly one tested standalone package.' }
+          $env:KH_SOURCE = $src
+          $env:KH_PACKAGE = $packages[0].FullName
+          @'
+          import hashlib, json, os, pathlib, zipfile
+          src = pathlib.Path(os.environ['KH_SOURCE'])
+          archive = pathlib.Path(os.environ['KH_PACKAGE'])
+          with zipfile.ZipFile(archive) as z:
+              assert z.testzip() is None, 'Archive corruption'
+              names = set(z.namelist())
+              prefix = 'Virtual_Khonshu_2_28_17_Standalone/'
+              assert prefix + 'Virtual Khonshu.exe' in names, 'EXE missing'
+              assert any(n.endswith('/python312.dll') for n in names), 'Bundled Python missing'
+              assets = [p for p in src.iterdir() if p.is_file() and p.suffix.lower() in {'.png','.gif','.wav','.ico'}]
+              for sub in ['animations', 'cosmetics']:
+                  assets.extend(p for p in (src/sub).rglob('*') if p.is_file())
+              for p in assets:
+                  name = prefix + p.relative_to(src).as_posix()
+                  assert name in names, f'Missing locked asset: {name}'
+                  assert hashlib.sha256(z.read(name)).digest() == hashlib.sha256(p.read_bytes()).digest(), f'Changed asset: {name}'
+              assert not any(pathlib.PurePosixPath(n).name.lower() == 'khonshu_state.json' for n in names), 'Live save must never ship'
+              smoke = json.loads(z.read(prefix + 'khonshu_smoke_test.json'))
+              assert smoke['ok'], 'Frozen startup check failed'
+              print(f'Verified {len(assets)} unchanged asset files and bundled runtime.')
+          '@ | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'verify_khonshu.py') -Encoding utf8
+          python (Join-Path $env:RUNNER_TEMP 'verify_khonshu.py')
+          if ($LASTEXITCODE -ne 0) { throw 'Distribution validation failed.' }
+          New-Item -ItemType Directory -Path deliverable -Force | Out-Null
+          Copy-Item -LiteralPath $packages[0].FullName -Destination deliverable
+          $hash = (Get-FileHash -LiteralPath (Join-Path 'deliverable' $packages[0].Name) -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($packages[0].Name)" | Set-Content -Path 'deliverable/SHA256.txt' -Encoding ascii
+      - name: Upload tested Windows package (not a public release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Virtual-Khonshu-Windows-x64
+          path: deliverable/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
