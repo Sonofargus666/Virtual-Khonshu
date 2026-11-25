@@ -1,4 +1,4 @@
-name: Build Lunar Cycle Windows x64
+name: Build Lunar Calendar Picker Windows x64
 
 on:
   release:
@@ -18,8 +18,8 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 25
     env:
-      SOURCE_URL: https://github.com/Sonofargus666/Virtual-Khonshu/releases/download/v2.28.19-beta/Virtual_Khonshu_2_28_19_Lunar_Cycle_Test.zip
-      SOURCE_SHA256: 1b62855a72f20bccbff3da915a93832f76ff562dc742fece004d35e2a3741f50
+      SOURCE_URL: https://github.com/Sonofargus666/Virtual-Khonshu/releases/download/v2.28.19-beta/Virtual_Khonshu_2_28_19_Calendar_Picker_Test.zip
+      SOURCE_SHA256: 3bf32e23fea41833c29dc109da823e43671649dc72730288327be0321a8247f2
     steps:
       - uses: actions/setup-python@v5
         with:
@@ -83,3 +83,19 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+  publish-tested-binary:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Virtual-Khonshu-2.28.19-Windows-x64
+          path: deliverable
+      - name: Attach verified standalone package to beta release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload v2.28.19-beta deliverable/Virtual_Khonshu_2_28_19_Standalone_Windows_x64.zip deliverable/SHA256.txt --repo Sonofargus666/Virtual-Khonshu
